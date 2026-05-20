@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+env/
+*.db
+*.sqlite3
+
+# Flutter
+mobile_flutter/build/
+mobile_flutter/.dart_tool/
+mobile_flutter/.flutter-plugins
+
+# React
+web_react/node_modules/
+web_react/build/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
