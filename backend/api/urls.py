@@ -17,3 +17,12 @@ router.register(r'inscriptions', InscriptionViewSet)
 urlpatterns = [
     path('', include(router.urls)),
 ]
+
+from .auth_views import login, logout, refresh_token
+
+urlpatterns = [
+    path('auth/login/',   login,         name='login'),
+    path('auth/logout/',  logout,        name='logout'),
+    path('auth/refresh/', refresh_token, name='refresh'),
+    path('', include(router.urls)),
+]

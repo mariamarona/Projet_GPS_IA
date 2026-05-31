@@ -15,6 +15,8 @@ INSTALLED_APPS = [
     # packages
     'rest_framework',
     'corsheaders',
+    'rest_framework_simplejwt',                    
+    'rest_framework_simplejwt.token_blacklist',    
     # ton app
     'api',
 ]
@@ -77,6 +79,12 @@ REST_FRAMEWORK = {
 
 # ── CORS (pour React et Flutter) ────────────────────────────
 CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:50394",
+    "http://localhost:3000",
+    "http://127.0.0.1:8000",
+]
 
 LANGUAGE_CODE = 'fr-fr'
 TIME_ZONE     = 'Africa/Bamako'
@@ -85,3 +93,13 @@ USE_TZ        = True
 
 STATIC_URL = '/static/'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+from datetime import timedelta
+
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME':  timedelta(hours=1),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    'ROTATE_REFRESH_TOKENS':  True,
+    'BLACKLIST_AFTER_ROTATION': True,
+    'AUTH_HEADER_TYPES': ('Bearer',),
+}
