@@ -26,6 +26,127 @@ class UtilisateurViewSet(viewsets.ModelViewSet):
             qs = qs.filter(role=role)
         return qs
 
+    @action(detail=True, methods=['GET'], url_path='presence')
+    def presence(self, request, pk=None):
+        utilisateur  = self.get_object()
+        module_id    = request.query_params.get('module_id')
+        inscriptions = Inscription.objects.filter(etudiant=utilisateur, is_active=True).select_related('module')
+        if module_id:
+            inscriptions = inscriptions.filter(module_id=module_id)
+
+        data_modules = []
+        total_sessions_global  = 0
+        total_presences_global = 0
+
+        for inscription in inscriptions:
+            module         = inscription.module
+            sessions       = Session.objects.filter(module=module, statut='TERMINE')
+            total_sessions = sessions.count()
+            presences      = Pointage.objects.filter(utilisateur=utilisateur, session__module=module, statut='VALIDE').count()
+            absences       = max(0, total_sessions - presences)
+            taux           = round((presences / total_sessions * 100), 1) if total_sessions > 0 else 0
+            seuil          = module.seuil_presence_pct
+            alerte_seuil   = taux < seuil
+            total_sessions_global  += total_sessions
+            total_presences_global += presences
+            data_modules.append({
+                'module_id':       module.id,
+                'module_code':     module.code,
+                'module_intitule': module.intitule,
+                'total_sessions':  total_sessions,
+                'presences':       presences,
+                'absences':        absences,
+                'taux_presence':   f'{taux}%',
+                'seuil_requis':    f'{seuil}%',
+                'alerte_seuil':    alerte_seuil,
+            })
+
+        taux_global = round((total_presences_global / total_sessions_global * 100), 1) if total_sessions_global > 0 else 0
+
+        return Response({
+            'etudiant': {
+                'id': str(utilisateur.id),
+                'matricule': utilisateur.matricule,
+                'nom': utilisateur.nom,
+                'prenom': utilisateur.prenom,
+            },
+            'taux_global':     f'{taux_global}%',
+            'total_sessions':  total_sessions_global,
+            'total_presences': total_presences_global,
+            'modules':         data_modules,
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['GET'], url_path='historique')
+    def historique(self, request, pk=None):
+        utilisateur = self.get_object()
+        module_id   = request.query_params.get('module_id')
+        date_debut  = request.query_params.get('date_debut')
+        date_fin    = request.query_params.get('date_fin')
+
+        pointages = Pointage.objects.filter(utilisateur=utilisateur).select_related('session__module', 'session__zone').order_by('-timestamp')
+        if module_id:
+            pointages = pointages.filter(session__module_id=module_id)
+        if date_debut:
+            pointages = pointages.filter(session__date__gte=date_debut)
+        if date_fin:
+            pointages = pointages.filter(session__date__lte=date_fin)
+
+        data = []
+        for p in pointages:
+            data.append({
+                'pointage_id': p.id,
+                'date':        str(p.session.date),
+                'heure':       str(p.timestamp),
+                'module':      p.session.module.code,
+                'intitule':    p.session.module.intitule,
+                'zone':        p.session.zone.nom,
+                'statut':      p.statut,
+                'distance_m':  p.distance_zone_m,
+                'est_fraude':  p.statut == 'HORS_ZONE',
+            })
+
+        return Response({
+            'etudiant': {
+                'id': str(utilisateur.id),
+                'matricule': utilisateur.matricule,
+                'nom': utilisateur.nom,
+                'prenom': utilisateur.prenom,
+            },
+            'total':     len(data),
+            'pointages': data,
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['GET'], url_path='absences')
+    def absences(self, request, pk=None):
+        utilisateur      = self.get_object()
+        modules_inscrits = Inscription.objects.filter(etudiant=utilisateur, is_active=True).values_list('module_id', flat=True)
+        sessions_terminees = Session.objects.filter(module_id__in=modules_inscrits, statut='TERMINE').select_related('module', 'zone')
+        sessions_pointees  = Pointage.objects.filter(utilisateur=utilisateur, statut='VALIDE').values_list('session_id', flat=True)
+
+        absences = []
+        for session in sessions_terminees:
+            if session.id not in sessions_pointees:
+                absences.append({
+                    'session_id':  session.id,
+                    'module':      session.module.code,
+                    'intitule':    session.module.intitule,
+                    'date':        str(session.date),
+                    'heure_debut': str(session.heure_debut),
+                    'heure_fin':   str(session.heure_fin),
+                    'zone':        session.zone.nom,
+                })
+
+        return Response({
+            'etudiant': {
+                'id': str(utilisateur.id),
+                'matricule': utilisateur.matricule,
+                'nom': utilisateur.nom,
+                'prenom': utilisateur.prenom,
+            },
+            'total_absences': len(absences),
+            'absences':       absences,
+        }, status=status.HTTP_200_OK)
+
 
 class ModuleViewSet(viewsets.ModelViewSet):
     queryset           = Module.objects.all()
@@ -67,30 +188,16 @@ class SessionViewSet(viewsets.ModelViewSet):
     def demarrer(self, request, pk=None):
         session = self.get_object()
         if session.statut != 'PLANIFIE':
-            return Response(
-                {'error': f'Impossible de démarrer — statut actuel : {session.statut}'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': f'Impossible de démarrer — statut actuel : {session.statut}'}, status=status.HTTP_400_BAD_REQUEST)
         session.statut = Session.Statut.EN_COURS
         session.save()
-        return Response({
-            'message':    f'Session {session.module.code} démarrée avec succès',
-            'session_id': session.id,
-            'statut':     session.statut,
-            'module':     session.module.code,
-            'zone':       session.zone.nom,
-            'heure_debut': str(session.heure_debut),
-            'heure_fin':   str(session.heure_fin),
-        }, status=status.HTTP_200_OK)
+        return Response({'message': f'Session {session.module.code} démarrée', 'session_id': session.id, 'statut': session.statut, 'module': session.module.code, 'zone': session.zone.nom, 'heure_debut': str(session.heure_debut), 'heure_fin': str(session.heure_fin)}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['POST'], url_path='terminer')
     def terminer(self, request, pk=None):
         session = self.get_object()
         if session.statut != 'EN_COURS':
-            return Response(
-                {'error': f'Impossible de terminer — statut actuel : {session.statut}'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': f'Impossible de terminer — statut actuel : {session.statut}'}, status=status.HTTP_400_BAD_REQUEST)
         session.statut = Session.Statut.TERMINE
         session.save()
         pointages     = Pointage.objects.filter(session=session)
@@ -99,59 +206,27 @@ class SessionViewSet(viewsets.ModelViewSet):
         hors_zone     = pointages.filter(statut='HORS_ZONE').count()
         inscrits      = Inscription.objects.filter(module=session.module, is_active=True).count()
         absents       = max(0, inscrits - total_pointes)
-        return Response({
-            'message':    f'Session {session.module.code} terminée',
-            'session_id': session.id,
-            'statut':     session.statut,
-            'resume': {
-                'inscrits':      inscrits,
-                'total_pointes': total_pointes,
-                'valides':       valides,
-                'hors_zone':     hors_zone,
-                'absents':       absents,
-                'taux_presence': f'{round(valides / inscrits * 100, 1) if inscrits > 0 else 0}%',
-            }
-        }, status=status.HTTP_200_OK)
+        return Response({'message': f'Session {session.module.code} terminée', 'session_id': session.id, 'statut': session.statut, 'resume': {'inscrits': inscrits, 'total_pointes': total_pointes, 'valides': valides, 'hors_zone': hors_zone, 'absents': absents, 'taux_presence': f'{round(valides / inscrits * 100, 1) if inscrits > 0 else 0}%'}}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['POST'], url_path='annuler')
     def annuler(self, request, pk=None):
         session = self.get_object()
         if session.statut == 'TERMINE':
-            return Response(
-                {'error': "Impossible d'annuler une session déjà terminée"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': "Impossible d'annuler une session déjà terminée"}, status=status.HTTP_400_BAD_REQUEST)
         session.statut = Session.Statut.ANNULEE
         session.save()
-        return Response({
-            'message':    f'Session {session.module.code} annulée',
-            'session_id': session.id,
-            'statut':     session.statut,
-        }, status=status.HTTP_200_OK)
+        return Response({'message': f'Session {session.module.code} annulée', 'session_id': session.id, 'statut': session.statut}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['GET'], url_path='absents')
     def absents(self, request, pk=None):
-        session  = self.get_object()
-        inscrits = Inscription.objects.filter(module=session.module, is_active=True).select_related('etudiant')
+        session     = self.get_object()
+        inscrits    = Inscription.objects.filter(module=session.module, is_active=True).select_related('etudiant')
         pointes_ids = Pointage.objects.filter(session=session, statut='VALIDE').values_list('utilisateur_id', flat=True)
         absents = []
         for inscription in inscrits:
             if inscription.etudiant.id not in pointes_ids:
-                absents.append({
-                    'id':        str(inscription.etudiant.id),
-                    'matricule': inscription.etudiant.matricule,
-                    'nom':       inscription.etudiant.nom,
-                    'prenom':    inscription.etudiant.prenom,
-                    'email':     inscription.etudiant.email,
-                })
-        return Response({
-            'session_id':     session.id,
-            'module':         session.module.code,
-            'date':           str(session.date),
-            'total_inscrits': inscrits.count(),
-            'total_absents':  len(absents),
-            'absents':        absents,
-        }, status=status.HTTP_200_OK)
+                absents.append({'id': str(inscription.etudiant.id), 'matricule': inscription.etudiant.matricule, 'nom': inscription.etudiant.nom, 'prenom': inscription.etudiant.prenom, 'email': inscription.etudiant.email})
+        return Response({'session_id': session.id, 'module': session.module.code, 'date': str(session.date), 'total_inscrits': inscrits.count(), 'total_absents': len(absents), 'absents': absents}, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['GET'], url_path="aujourd-hui")
     def aujourd_hui(self, request):
@@ -160,17 +235,7 @@ class SessionViewSet(viewsets.ModelViewSet):
         data = []
         for s in sessions:
             nb = Pointage.objects.filter(session=s, statut='VALIDE').count()
-            data.append({
-                'id':           s.id,
-                'module':       s.module.code,
-                'intitule':     s.module.intitule,
-                'zone':         s.zone.nom,
-                'date':         str(s.date),
-                'heure_debut':  str(s.heure_debut),
-                'heure_fin':    str(s.heure_fin),
-                'statut':       s.statut,
-                'nb_presences': nb,
-            })
+            data.append({'id': s.id, 'module': s.module.code, 'intitule': s.module.intitule, 'zone': s.zone.nom, 'date': str(s.date), 'heure_debut': str(s.heure_debut), 'heure_fin': str(s.heure_fin), 'statut': s.statut, 'nb_presences': nb})
         return Response({'date': str(today), 'total': len(data), 'sessions': data}, status=status.HTTP_200_OK)
 
 
@@ -201,18 +266,11 @@ class AlerteFraudeViewSet(viewsets.ModelViewSet):
         statut      = request.data.get('statut')
         traite_par  = request.data.get('traite_par')
         commentaire = request.data.get('commentaire', None)
-
         statuts_valides = ['EN_INVESTIGATION', 'FRAUDE_CONFIRMEE', 'FAUSSE_ALERTE']
         if not statut or statut not in statuts_valides:
-            return Response(
-                {'error': f'Statut invalide. Choisir parmi : {statuts_valides}'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': f'Statut invalide. Choisir parmi : {statuts_valides}'}, status=status.HTTP_400_BAD_REQUEST)
         if alerte.statut in ['FRAUDE_CONFIRMEE', 'FAUSSE_ALERTE']:
-            return Response(
-                {'error': f'Alerte déjà traitée — statut : {alerte.statut}'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': f'Alerte déjà traitée — statut : {alerte.statut}'}, status=status.HTTP_400_BAD_REQUEST)
         alerte.statut = statut
         if commentaire:
             alerte.commentaire = commentaire
@@ -225,53 +283,15 @@ class AlerteFraudeViewSet(viewsets.ModelViewSet):
         if statut in ['FRAUDE_CONFIRMEE', 'FAUSSE_ALERTE']:
             alerte.traite_at = timezone.now()
         alerte.save()
-        return Response({
-            'message':     f'Alerte mise à jour → {statut}',
-            'alerte_id':   alerte.id,
-            'statut':      alerte.statut,
-            'traite_at':   alerte.traite_at,
-            'commentaire': alerte.commentaire,
-        }, status=status.HTTP_200_OK)
+        return Response({'message': f'Alerte mise à jour → {statut}', 'alerte_id': alerte.id, 'statut': alerte.statut, 'traite_at': alerte.traite_at, 'commentaire': alerte.commentaire}, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['GET'], url_path='non-traitees')
     def non_traitees(self, request):
-        alertes = AlerteFraude.objects.filter(
-            statut='NON_TRAITEE'
-        ).select_related(
-            'pointage__utilisateur',
-            'pointage__session__module',
-            'pointage__session__zone'
-        ).order_by('-timestamp')
-
+        alertes = AlerteFraude.objects.filter(statut='NON_TRAITEE').select_related('pointage__utilisateur', 'pointage__session__module', 'pointage__session__zone').order_by('-timestamp')
         data = []
         for a in alertes:
             p = a.pointage
-            data.append({
-                'alerte_id':       a.id,
-                'type_fraude':     a.type_fraude,
-                'niveau_severite': a.niveau_severite,
-                'score_ia':        a.score_ia,
-                'timestamp':       a.timestamp,
-                'etudiant': {
-                    'id':        str(p.utilisateur.id),
-                    'matricule': p.utilisateur.matricule,
-                    'nom':       p.utilisateur.nom,
-                    'prenom':    p.utilisateur.prenom,
-                },
-                'session': {
-                    'id':     p.session.id,
-                    'module': p.session.module.code,
-                    'date':   str(p.session.date),
-                    'zone':   p.session.zone.nom,
-                },
-                'pointage': {
-                    'id':         p.id,
-                    'latitude':   str(p.latitude),
-                    'longitude':  str(p.longitude),
-                    'distance_m': p.distance_zone_m,
-                    'timestamp':  p.timestamp,
-                }
-            })
+            data.append({'alerte_id': a.id, 'type_fraude': a.type_fraude, 'niveau_severite': a.niveau_severite, 'score_ia': a.score_ia, 'timestamp': a.timestamp, 'etudiant': {'id': str(p.utilisateur.id), 'matricule': p.utilisateur.matricule, 'nom': p.utilisateur.nom, 'prenom': p.utilisateur.prenom}, 'session': {'id': p.session.id, 'module': p.session.module.code, 'date': str(p.session.date), 'zone': p.session.zone.nom}, 'pointage': {'id': p.id, 'latitude': str(p.latitude), 'longitude': str(p.longitude), 'distance_m': p.distance_zone_m, 'timestamp': p.timestamp}})
         return Response({'total': len(data), 'alertes': data}, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['GET'], url_path='dashboard')
@@ -291,43 +311,18 @@ class AlerteFraudeViewSet(viewsets.ModelViewSet):
             c = AlerteFraude.objects.filter(niveau_severite=n.value).count()
             if c > 0:
                 par_severite[n.value] = c
-        return Response({
-            'total':            total,
-            'non_traitees':     non_traitees,
-            'en_investigation': en_investigation,
-            'confirmees':       confirmees,
-            'fausses_alertes':  fausses_alertes,
-            'par_type':         par_type,
-            'par_severite':     par_severite,
-        }, status=status.HTTP_200_OK)
+        return Response({'total': total, 'non_traitees': non_traitees, 'en_investigation': en_investigation, 'confirmees': confirmees, 'fausses_alertes': fausses_alertes, 'par_type': par_type, 'par_severite': par_severite}, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['GET'], url_path='par-etudiant')
     def par_etudiant(self, request):
         utilisateur_id = request.query_params.get('utilisateur_id')
         if not utilisateur_id:
             return Response({'error': 'utilisateur_id requis'}, status=status.HTTP_400_BAD_REQUEST)
-        alertes = AlerteFraude.objects.filter(
-            pointage__utilisateur_id=utilisateur_id
-        ).select_related('pointage__session__module').order_by('-timestamp')
+        alertes = AlerteFraude.objects.filter(pointage__utilisateur_id=utilisateur_id).select_related('pointage__session__module').order_by('-timestamp')
         data = []
         for a in alertes:
-            data.append({
-                'alerte_id':       a.id,
-                'type_fraude':     a.type_fraude,
-                'niveau_severite': a.niveau_severite,
-                'score_ia':        a.score_ia,
-                'statut':          a.statut,
-                'timestamp':       a.timestamp,
-                'traite_at':       a.traite_at,
-                'commentaire':     a.commentaire,
-                'module':          a.pointage.session.module.code,
-                'date_session':    str(a.pointage.session.date),
-            })
-        return Response({
-            'utilisateur_id': utilisateur_id,
-            'total':          len(data),
-            'alertes':        data,
-        }, status=status.HTTP_200_OK)
+            data.append({'alerte_id': a.id, 'type_fraude': a.type_fraude, 'niveau_severite': a.niveau_severite, 'score_ia': a.score_ia, 'statut': a.statut, 'timestamp': a.timestamp, 'traite_at': a.traite_at, 'commentaire': a.commentaire, 'module': a.pointage.session.module.code, 'date_session': str(a.pointage.session.date)})
+        return Response({'utilisateur_id': utilisateur_id, 'total': len(data), 'alertes': data}, status=status.HTTP_200_OK)
 
 
 class PointageViewSet(viewsets.ModelViewSet):
@@ -355,12 +350,8 @@ class PointageViewSet(viewsets.ModelViewSet):
         latitude       = request.data.get('latitude')
         longitude      = request.data.get('longitude')
         precision      = request.data.get('precision_gps_m', None)
-
         if not all([utilisateur_id, session_id, latitude, longitude]):
-            return Response(
-                {'error': 'utilisateur_id, session_id, latitude et longitude sont requis'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': 'utilisateur_id, session_id, latitude et longitude sont requis'}, status=status.HTTP_400_BAD_REQUEST)
         try:
             utilisateur = Utilisateur.objects.get(id=utilisateur_id)
         except Utilisateur.DoesNotExist:
@@ -370,41 +361,16 @@ class PointageViewSet(viewsets.ModelViewSet):
         except Session.DoesNotExist:
             return Response({'error': 'Session non trouvée'}, status=status.HTTP_404_NOT_FOUND)
         if session.statut not in ['EN_COURS', 'PLANIFIE']:
-            return Response(
-                {'error': f'Session {session.statut} — pointage impossible'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': f'Session {session.statut} — pointage impossible'}, status=status.HTTP_400_BAD_REQUEST)
         zone     = session.zone
         distance = calculer_distance_metres(latitude, longitude, zone.latitude, zone.longitude)
         dans_zone       = distance <= float(zone.rayon_m)
         statut_pointage = Pointage.Statut.VALIDE if dans_zone else Pointage.Statut.HORS_ZONE
         est_fraude      = not dans_zone
-        pointage = Pointage.objects.create(
-            utilisateur=utilisateur, session=session,
-            latitude=latitude, longitude=longitude,
-            precision_gps_m=precision,
-            distance_zone_m=round(distance, 2),
-            statut=statut_pointage,
-            timestamp=timezone.now(),
-        )
+        pointage = Pointage.objects.create(utilisateur=utilisateur, session=session, latitude=latitude, longitude=longitude, precision_gps_m=precision, distance_zone_m=round(distance, 2), statut=statut_pointage, timestamp=timezone.now())
         if est_fraude:
-            AlerteFraude.objects.create(
-                pointage=pointage,
-                type_fraude=AlerteFraude.TypeFraude.HORS_ZONE,
-                score_ia=round(min(distance / float(zone.rayon_m), 1.0), 3),
-                niveau_severite=AlerteFraude.NiveauSeverite.ELEVE,
-                statut=AlerteFraude.Statut.NON_TRAITEE,
-                commentaire=f'Distance: {round(distance, 1)}m — Zone autorisée: {zone.rayon_m}m'
-            )
-        return Response({
-            'pointage_id':  pointage.id,
-            'statut':       statut_pointage,
-            'dans_zone':    dans_zone,
-            'distance_m':   round(distance, 2),
-            'rayon_zone_m': float(zone.rayon_m),
-            'est_fraude':   est_fraude,
-            'message':      '✅ Pointage validé' if dans_zone else '❌ Hors zone GPS — alerte créée'
-        }, status=status.HTTP_201_CREATED)
+            AlerteFraude.objects.create(pointage=pointage, type_fraude=AlerteFraude.TypeFraude.HORS_ZONE, score_ia=round(min(distance / float(zone.rayon_m), 1.0), 3), niveau_severite=AlerteFraude.NiveauSeverite.ELEVE, statut=AlerteFraude.Statut.NON_TRAITEE, commentaire=f'Distance: {round(distance, 1)}m — Zone autorisée: {zone.rayon_m}m')
+        return Response({'pointage_id': pointage.id, 'statut': statut_pointage, 'dans_zone': dans_zone, 'distance_m': round(distance, 2), 'rayon_zone_m': float(zone.rayon_m), 'est_fraude': est_fraude, 'message': '✅ Pointage validé' if dans_zone else '❌ Hors zone GPS — alerte créée'}, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=['GET'], url_path='stats')
     def stats(self, request):
@@ -420,13 +386,7 @@ class PointageViewSet(viewsets.ModelViewSet):
         hors_zone = qs.filter(statut='HORS_ZONE').count()
         rejetes   = qs.filter(statut='REJETE').count()
         taux      = round((valides / total * 100), 1) if total > 0 else 0
-        return Response({
-            'total':         total,
-            'valides':       valides,
-            'hors_zone':     hors_zone,
-            'rejetes':       rejetes,
-            'taux_presence': f'{taux}%',
-        }, status=status.HTTP_200_OK)
+        return Response({'total': total, 'valides': valides, 'hors_zone': hors_zone, 'rejetes': rejetes, 'taux_presence': f'{taux}%'}, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['GET'], url_path='par-session')
     def par_session(self, request):
@@ -436,18 +396,5 @@ class PointageViewSet(viewsets.ModelViewSet):
         pointages = Pointage.objects.filter(session_id=session_id).select_related('utilisateur', 'session')
         data = []
         for p in pointages:
-            data.append({
-                'pointage_id': p.id,
-                'etudiant': {
-                    'id': str(p.utilisateur.id),
-                    'matricule': p.utilisateur.matricule,
-                    'nom': p.utilisateur.nom,
-                    'prenom': p.utilisateur.prenom,
-                },
-                'timestamp':  p.timestamp,
-                'statut':     p.statut,
-                'distance_m': p.distance_zone_m,
-                'latitude':   str(p.latitude),
-                'longitude':  str(p.longitude),
-            })
+            data.append({'pointage_id': p.id, 'etudiant': {'id': str(p.utilisateur.id), 'matricule': p.utilisateur.matricule, 'nom': p.utilisateur.nom, 'prenom': p.utilisateur.prenom}, 'timestamp': p.timestamp, 'statut': p.statut, 'distance_m': p.distance_zone_m, 'latitude': str(p.latitude), 'longitude': str(p.longitude)})
         return Response({'session_id': session_id, 'total': len(data), 'pointages': data}, status=status.HTTP_200_OK)
