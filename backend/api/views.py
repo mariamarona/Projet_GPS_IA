@@ -3,7 +3,6 @@ from rest_framework.response import Response
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny
 from django.utils import timezone
-from django.db.models import Count, Q
 
 from .models import Utilisateur, Module, ZoneGPS, Session, Pointage, AlerteFraude, Inscription
 from .serializers import (
@@ -14,6 +13,9 @@ from .utils import calculer_distance_metres
 import datetime
 
 
+# ─────────────────────────────────────────────
+#  UTILISATEUR
+# ─────────────────────────────────────────────
 class UtilisateurViewSet(viewsets.ModelViewSet):
     queryset           = Utilisateur.objects.all()
     serializer_class   = UtilisateurSerializer
@@ -26,6 +28,7 @@ class UtilisateurViewSet(viewsets.ModelViewSet):
             qs = qs.filter(role=role)
         return qs
 
+    # ── GET /api/utilisateurs/{id}/presence/ ─────────────────
     @action(detail=True, methods=['GET'], url_path='presence')
     def presence(self, request, pk=None):
         utilisateur  = self.get_object()
@@ -34,7 +37,7 @@ class UtilisateurViewSet(viewsets.ModelViewSet):
         if module_id:
             inscriptions = inscriptions.filter(module_id=module_id)
 
-        data_modules = []
+        data_modules           = []
         total_sessions_global  = 0
         total_presences_global = 0
 
@@ -64,18 +67,14 @@ class UtilisateurViewSet(viewsets.ModelViewSet):
         taux_global = round((total_presences_global / total_sessions_global * 100), 1) if total_sessions_global > 0 else 0
 
         return Response({
-            'etudiant': {
-                'id': str(utilisateur.id),
-                'matricule': utilisateur.matricule,
-                'nom': utilisateur.nom,
-                'prenom': utilisateur.prenom,
-            },
+            'etudiant': {'id': str(utilisateur.id), 'matricule': utilisateur.matricule, 'nom': utilisateur.nom, 'prenom': utilisateur.prenom},
             'taux_global':     f'{taux_global}%',
             'total_sessions':  total_sessions_global,
             'total_presences': total_presences_global,
             'modules':         data_modules,
         }, status=status.HTTP_200_OK)
 
+    # ── GET /api/utilisateurs/{id}/historique/ ────────────────
     @action(detail=True, methods=['GET'], url_path='historique')
     def historique(self, request, pk=None):
         utilisateur = self.get_object()
@@ -106,20 +105,16 @@ class UtilisateurViewSet(viewsets.ModelViewSet):
             })
 
         return Response({
-            'etudiant': {
-                'id': str(utilisateur.id),
-                'matricule': utilisateur.matricule,
-                'nom': utilisateur.nom,
-                'prenom': utilisateur.prenom,
-            },
+            'etudiant': {'id': str(utilisateur.id), 'matricule': utilisateur.matricule, 'nom': utilisateur.nom, 'prenom': utilisateur.prenom},
             'total':     len(data),
             'pointages': data,
         }, status=status.HTTP_200_OK)
 
+    # ── GET /api/utilisateurs/{id}/absences/ ──────────────────
     @action(detail=True, methods=['GET'], url_path='absences')
     def absences(self, request, pk=None):
-        utilisateur      = self.get_object()
-        modules_inscrits = Inscription.objects.filter(etudiant=utilisateur, is_active=True).values_list('module_id', flat=True)
+        utilisateur        = self.get_object()
+        modules_inscrits   = Inscription.objects.filter(etudiant=utilisateur, is_active=True).values_list('module_id', flat=True)
         sessions_terminees = Session.objects.filter(module_id__in=modules_inscrits, statut='TERMINE').select_related('module', 'zone')
         sessions_pointees  = Pointage.objects.filter(utilisateur=utilisateur, statut='VALIDE').values_list('session_id', flat=True)
 
@@ -137,35 +132,139 @@ class UtilisateurViewSet(viewsets.ModelViewSet):
                 })
 
         return Response({
-            'etudiant': {
-                'id': str(utilisateur.id),
-                'matricule': utilisateur.matricule,
-                'nom': utilisateur.nom,
-                'prenom': utilisateur.prenom,
-            },
+            'etudiant': {'id': str(utilisateur.id), 'matricule': utilisateur.matricule, 'nom': utilisateur.nom, 'prenom': utilisateur.prenom},
             'total_absences': len(absences),
             'absences':       absences,
         }, status=status.HTTP_200_OK)
 
+    # ── GET /api/utilisateurs/{id}/sessions/ ──────────────────
+    @action(detail=True, methods=['GET'], url_path='sessions')
+    def sessions(self, request, pk=None):
+        utilisateur = self.get_object()
+        statut      = request.query_params.get('statut')
+        date        = request.query_params.get('date')
 
+        sessions = Session.objects.filter(created_by=utilisateur).select_related('module', 'zone').order_by('-date', 'heure_debut')
+        if statut:
+            sessions = sessions.filter(statut=statut)
+        if date:
+            sessions = sessions.filter(date=date)
+
+        data = []
+        for s in sessions:
+            nb_presences = Pointage.objects.filter(session=s, statut='VALIDE').count()
+            nb_inscrits  = Inscription.objects.filter(module=s.module, is_active=True).count()
+            data.append({
+                'id':            s.id,
+                'module':        s.module.code,
+                'intitule':      s.module.intitule,
+                'zone':          s.zone.nom,
+                'date':          str(s.date),
+                'heure_debut':   str(s.heure_debut),
+                'heure_fin':     str(s.heure_fin),
+                'statut':        s.statut,
+                'nb_presences':  nb_presences,
+                'nb_inscrits':   nb_inscrits,
+                'taux_presence': f'{round(nb_presences / nb_inscrits * 100, 1) if nb_inscrits > 0 else 0}%',
+            })
+
+        return Response({
+            'enseignant': {'id': str(utilisateur.id), 'matricule': utilisateur.matricule, 'nom': utilisateur.nom, 'prenom': utilisateur.prenom},
+            'total':    len(data),
+            'sessions': data,
+        }, status=status.HTTP_200_OK)
+
+
+# ─────────────────────────────────────────────
+#  MODULE
+# ─────────────────────────────────────────────
 class ModuleViewSet(viewsets.ModelViewSet):
     queryset           = Module.objects.all()
     serializer_class   = ModuleSerializer
     permission_classes = [AllowAny]
 
+    # ── GET /api/modules/{id}/etudiants/ ──────────────────────
+    @action(detail=True, methods=['GET'], url_path='etudiants')
+    def etudiants(self, request, pk=None):
+        module       = self.get_object()
+        inscriptions = Inscription.objects.filter(module=module, is_active=True).select_related('etudiant')
+        sessions_terminees = Session.objects.filter(module=module, statut='TERMINE').count()
 
+        data = []
+        for inscription in inscriptions:
+            etudiant  = inscription.etudiant
+            presences = Pointage.objects.filter(utilisateur=etudiant, session__module=module, statut='VALIDE').count()
+            taux      = round((presences / sessions_terminees * 100), 1) if sessions_terminees > 0 else 0
+            data.append({
+                'id':               str(etudiant.id),
+                'matricule':        etudiant.matricule,
+                'nom':              etudiant.nom,
+                'prenom':           etudiant.prenom,
+                'email':            etudiant.email,
+                'date_inscription': str(inscription.date_inscription),
+                'presences':        presences,
+                'taux_presence':    f'{taux}%',
+                'alerte_seuil':     taux < module.seuil_presence_pct,
+            })
+
+        return Response({
+            'module': {'id': module.id, 'code': module.code, 'intitule': module.intitule, 'seuil_presence_pct': module.seuil_presence_pct},
+            'total_inscrits': len(data),
+            'etudiants':      data,
+        }, status=status.HTTP_200_OK)
+
+    # ── GET /api/modules/{id}/stats/ ──────────────────────────
+    @action(detail=True, methods=['GET'], url_path='stats')
+    def stats(self, request, pk=None):
+        module = self.get_object()
+
+        sessions_total     = Session.objects.filter(module=module).count()
+        sessions_terminees = Session.objects.filter(module=module, statut='TERMINE').count()
+        sessions_en_cours  = Session.objects.filter(module=module, statut='EN_COURS').count()
+        sessions_planifiees = Session.objects.filter(module=module, statut='PLANIFIE').count()
+        nb_inscrits        = Inscription.objects.filter(module=module, is_active=True).count()
+        total_pointages    = Pointage.objects.filter(session__module=module, statut='VALIDE').count()
+        taux_moyen         = round((total_pointages / (sessions_terminees * nb_inscrits) * 100), 1) if sessions_terminees > 0 and nb_inscrits > 0 else 0
+        nb_alertes         = AlerteFraude.objects.filter(pointage__session__module=module).count()
+
+        sous_seuil    = 0
+        inscriptions  = Inscription.objects.filter(module=module, is_active=True).select_related('etudiant')
+        for inscription in inscriptions:
+            presences = Pointage.objects.filter(utilisateur=inscription.etudiant, session__module=module, statut='VALIDE').count()
+            taux      = round((presences / sessions_terminees * 100), 1) if sessions_terminees > 0 else 0
+            if taux < module.seuil_presence_pct:
+                sous_seuil += 1
+
+        return Response({
+            'module': {'id': module.id, 'code': module.code, 'intitule': module.intitule, 'seuil_presence_pct': module.seuil_presence_pct, 'enseignant': f'{module.enseignant.prenom} {module.enseignant.nom}'},
+            'sessions': {'total': sessions_total, 'terminees': sessions_terminees, 'en_cours': sessions_en_cours, 'planifiees': sessions_planifiees},
+            'etudiants': {'total_inscrits': nb_inscrits, 'sous_seuil': sous_seuil},
+            'presence': {'taux_moyen': f'{taux_moyen}%', 'total_pointages': total_pointages},
+            'fraude': {'total_alertes': nb_alertes},
+        }, status=status.HTTP_200_OK)
+
+
+# ─────────────────────────────────────────────
+#  ZONE GPS
+# ─────────────────────────────────────────────
 class ZoneGPSViewSet(viewsets.ModelViewSet):
     queryset           = ZoneGPS.objects.all()
     serializer_class   = ZoneGPSSerializer
     permission_classes = [AllowAny]
 
 
+# ─────────────────────────────────────────────
+#  INSCRIPTION
+# ─────────────────────────────────────────────
 class InscriptionViewSet(viewsets.ModelViewSet):
     queryset           = Inscription.objects.all()
     serializer_class   = InscriptionSerializer
     permission_classes = [AllowAny]
 
 
+# ─────────────────────────────────────────────
+#  SESSION
+# ─────────────────────────────────────────────
 class SessionViewSet(viewsets.ModelViewSet):
     queryset           = Session.objects.all()
     serializer_class   = SessionSerializer
@@ -239,6 +338,9 @@ class SessionViewSet(viewsets.ModelViewSet):
         return Response({'date': str(today), 'total': len(data), 'sessions': data}, status=status.HTTP_200_OK)
 
 
+# ─────────────────────────────────────────────
+#  ALERTE FRAUDE
+# ─────────────────────────────────────────────
 class AlerteFraudeViewSet(viewsets.ModelViewSet):
     queryset           = AlerteFraude.objects.all()
     serializer_class   = AlerteFraudeSerializer
@@ -325,6 +427,9 @@ class AlerteFraudeViewSet(viewsets.ModelViewSet):
         return Response({'utilisateur_id': utilisateur_id, 'total': len(data), 'alertes': data}, status=status.HTTP_200_OK)
 
 
+# ─────────────────────────────────────────────
+#  POINTAGE
+# ─────────────────────────────────────────────
 class PointageViewSet(viewsets.ModelViewSet):
     queryset           = Pointage.objects.all()
     serializer_class   = PointageSerializer
